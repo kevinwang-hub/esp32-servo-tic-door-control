@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Arduino build artifacts
+build/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Logs / temp
+*.log

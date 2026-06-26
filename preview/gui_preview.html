@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Angle Control (Preview)</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; background:#111; color:#eee; }
+    h2 { margin-bottom: 4px; }
+    .card { background:#1e1e1e; border-radius:12px; padding:20px; margin:18px 0;
+            box-shadow:0 2px 8px rgba(0,0,0,.4); }
+    input[type=range]{ width:100%; height:36px; }
+    .val { font-size:2rem; font-weight:bold; color:#4ea1ff; }
+    .row { display:flex; justify-content:space-between; align-items:baseline; }
+    small { color:#888; }
+    .banner { background:#332701; color:#ffce5c; padding:10px 14px; border-radius:8px;
+              font-size:.9rem; margin-bottom:8px; }
+    #log { font-family:monospace; font-size:.85rem; color:#7CFC9A; white-space:pre-line; }
+  </style>
+</head>
+<body>
+  <h1>ESP32 Angle Control</h1>
+  <div class="banner">
+    PREVIEW MODE &mdash; this is a local mock of the page the ESP32 serves.
+    Requests are logged below instead of being sent to the board.
+    On real hardware, connect to Wi-Fi &ldquo;ESP32-Control&rdquo; and open http://192.168.4.1
+  </div>
+
+  <div class="card">
+    <div class="row"><h2>Servo</h2><span class="val" id="servoVal">90&deg;</span></div>
+    <input type="range" id="servo" min="0" max="180" value="90"
+           oninput="send('servo', this.value, 'servoVal')">
+    <small>0&deg; &ndash; 180&deg;</small>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2>Stepper (output shaft)</h2><span class="val" id="stepVal">0&deg;</span></div>
+    <input type="range" id="step" min="-180" max="180" value="0"
+           oninput="send('step', this.value, 'stepVal')">
+    <small>-180&deg; &ndash; 180&deg;</small>
+  </div>
+
+  <div class="card">
+    <h2>Request log</h2>
+    <div id="log">(drag a slider)</div>
+  </div>
+
+  <script>
+    // ----- Preview-only mock of the ESP32 endpoint -----
+    const PREVIEW = (location.protocol === 'file:' ||
+                     location.hostname === '' ||
+                     location.hostname === 'localhost' ||
+                     location.hostname === '127.0.0.1');
+    const logEl = document.getElementById('log');
+    function logLine(s) {
+      logEl.textContent = (new Date().toLocaleTimeString() + '  ' + s + '\n' +
+                           logEl.textContent).split('\n').slice(0, 12).join('\n');
+    }
+
+    let timer = null;
+    function send(which, value, labelId) {
+      document.getElementById(labelId).innerHTML = value + '&deg;';
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const url = '/set?' + which + '=' + value;
+        if (PREVIEW) {
+          logLine('GET ' + url + '   (mocked, no board)');
+        } else {
+          fetch(url).catch(e => console.log(e));
+        }
+      }, 60);
+    }
+  </script>
+</body>
+</html>
