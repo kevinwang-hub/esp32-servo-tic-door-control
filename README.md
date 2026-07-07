@@ -89,3 +89,16 @@ Features:
   the controller's homing feature.
 - Servos require an external 6.0–8.4 V supply with common ground to the ESP32 —
   do not power them from the ESP32's 3V3/5V rail.
+
+---
+
+## Variant: INA219 current-monitored servo door
+
+This branch (`ina219-servo-current-door`) also contains an alternate
+implementation that drops the Tic stepper and instead uses an **INA219 current
+sensor** for closed-loop safety (over-current e-stop, snug detection) on the two
+RDS5180 servos. See **[README-ina219-servo-door.md](README-ina219-servo-door.md)**
+for wiring, the serial protocol, safety logic, and build/run steps.
+
+Key files: `servo_current_monitor/`, `host_gui/servo_gui.py`,
+`diagnostics/`, `tools/watch_ina219.command`.
