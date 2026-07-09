@@ -53,6 +53,7 @@ class SerialWorker:
         self.virt_switch = False    # 虚拟开关(电流特征)
         self.servos_idle = False    # 舵机待机(未上电)
         self.cycle_status = None    # 耐久测试进度 "3/10"
+        self.total_cycles = None    # 累计总循环数(NVS持久化)
         self.door_actual = None
         self.handle_actual = None
         self.t0 = time.time()
@@ -121,6 +122,9 @@ class SerialWorker:
                 self.servos_idle = "{servos:idle}" in line
                 cy = re.search(r"\{cyc:(\d+)/(\d+)\}", line)
                 self.cycle_status = f"{cy.group(1)}/{cy.group(2)}" if cy else None
+                tc = re.search(r"\btc=(\d+)", line)
+                if tc:
+                    self.total_cycles = int(tc.group(1))
             elif "!!! ESTOP" in line:
                 self.fault = True
             a = ANGLE_RE.search(line)
@@ -343,6 +347,10 @@ class App:
                  font=("Helvetica", 13)).pack(side="right", padx=4)
         tk.Label(srow, text="Cycles:", bg=BG, fg=MUTED,
                  font=("Helvetica", 12, "bold")).pack(side="right")
+        # 累计总循环数(固件NVS持久化)
+        self.total_lbl = tk.Label(srow, text="Total: —", bg=BG, fg=MUTED,
+                                  font=("Helvetica", 12, "bold"))
+        self.total_lbl.pack(side="right", padx=(0, 14))
 
         def run_cycles(_e=None):
             try:
@@ -465,6 +473,10 @@ class App:
             self.seq_lbl.config(text="💤 Servos idle — any command engages them", fg=MUTED)
         else:
             self.seq_lbl.config(text="", fg=AMBER)
+
+        # 累计总循环数
+        if w.total_cycles is not None:
+            self.total_lbl.config(text=f"Total: {w.total_cycles}")
 
         # 门关紧开关状态: 物理D17 / 虚拟(电流特征)
         if w.door_switch:

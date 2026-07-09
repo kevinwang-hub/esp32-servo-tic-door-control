@@ -22,6 +22,7 @@
 #include <Wire.h>
 #include <Adafruit_INA219.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>   // NVS: 持久化累计循环数
 
 #define SDA_PIN 21
 #define SCL_PIN 22
@@ -53,9 +54,9 @@ int servoMaxUs = 2500;
 #define I_RELIEF_MA    800.0f    // pressure-relief target after snug
 #define BOOT_GRACE_MS  2000UL    // protection grace after boot/resume
 
-// 虚拟门关紧开关: Step2 顶门时最近3秒电流平均值 >2000mA => 视为门已关紧
+// 虚拟门关紧开关: Step2 顶门时最近3秒电流平均值 >1600mA => 视为门已关紧
 // (滑动窗口平均, 60个样本 x 50ms, 抗电流波动)
-#define VSW_MA         2000.0f
+#define VSW_MA         1600.0f
 #define VSW_MS         3000UL
 #define VSW_WIN        60        // = VSW_MS / 50ms
 
@@ -87,6 +88,10 @@ int  cycleTarget = 0, cycleCount = 0;
 int  cyclePhase = 0;      // 0=启动开门 1=开门中 2=开后暂停 3=启动关门 4=关门中 5=关后暂停
 unsigned long cyclePauseUntil = 0;
 #define CYCLE_PAUSE_MS 5000UL
+
+// 累计总循环数(存 NVS, 断电/重烧不丢)
+Preferences prefs;
+uint32_t totalCycles = 0;
 
 // Current monitoring
 float lastI = 0;
@@ -267,7 +272,10 @@ void tickCycle(unsigned long now) {
     case 4:   // 等关门序列完成
       if (seq == SEQ_NONE) {
         cycleCount++;
-        Serial.printf(">> [cycle] %d/%d complete\n", cycleCount, cycleTarget);
+        totalCycles++;
+        prefs.putUInt("total", totalCycles);   // 持久化
+        Serial.printf(">> [cycle] %d/%d complete (lifetime total: %lu)\n",
+                      cycleCount, cycleTarget, (unsigned long)totalCycles);
         cyclePauseUntil = now + CYCLE_PAUSE_MS; cyclePhase = 5;
       }
       break;
@@ -408,8 +416,9 @@ void parseCommand(String cmd) {
     Serial.printf(">> Speed = %.0f deg/s\n", servoSpeedDps);
   }
   else if (tok == "cal") {
-    Serial.printf(">> Cal: 0deg=%dus 270deg=%dus speed=%.0fdeg/s door limits %d~%d lock=%d\n",
-                  servoMinUs, servoMaxUs, servoSpeedDps, DOOR_MIN_DEG, DOOR_MAX_DEG, HANDLE_LOCK);
+    Serial.printf(">> Cal: 0deg=%dus 270deg=%dus speed=%.0fdeg/s door limits %d~%d lock=%d vsw>%.0fmA lifetime cycles=%lu\n",
+                  servoMinUs, servoMaxUs, servoSpeedDps, DOOR_MIN_DEG, DOOR_MAX_DEG, HANDLE_LOCK,
+                  VSW_MA, (unsigned long)totalCycles);
   }
   else {                            // default: <ch> <angle>
     if (sp > 0) moveServo(tok.toInt(), rest.toInt());
@@ -435,7 +444,10 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  pinMode(DOOR_SWITCH_PIN, INPUT_PULLUP);  // pressed = LOW
+  pinMode(DOOR_SWITCH_PIN, INPUT_PULLUP);
+
+  prefs.begin("door", false);              // NVS 命名空间
+  totalCycles = prefs.getUInt("total", 0); // 读回累计循环数
 
   Wire.begin(SDA_PIN, SCL_PIN);
   if (!ina219.begin()) {
@@ -512,8 +524,8 @@ void loop() {
       snprintf(cyc, sizeof(cyc), "  {cyc:%d/%d}", cycleCount, cycleTarget);
       strncat(suffix, cyc, sizeof(suffix) - strlen(suffix) - 1);
     }
-    Serial.printf("V=%.2fV  I=%.1fmA  P=%.0fmW   [door=%d  handle=%d  sw=%d  vsw=%d]%s\n",
+    Serial.printf("V=%.2fV  I=%.1fmA  P=%.0fmW   [door=%d  handle=%d  sw=%d  vsw=%d  tc=%lu]%s\n",
                   busV, lastI, power, (int)(curDoor + 0.5f), (int)(curHandle + 0.5f),
-                  swPressed ? 1 : 0, vswPressed ? 1 : 0, suffix);
+                  swPressed ? 1 : 0, vswPressed ? 1 : 0, (unsigned long)totalCycles, suffix);
   }
 }
