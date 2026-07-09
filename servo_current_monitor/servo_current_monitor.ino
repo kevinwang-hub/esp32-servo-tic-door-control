@@ -53,6 +53,12 @@ int servoMaxUs = 2500;
 #define I_RELIEF_MA    800.0f    // pressure-relief target after snug
 #define BOOT_GRACE_MS  2000UL    // protection grace after boot/resume
 
+// 虚拟门关紧开关: Step2 顶门时最近3秒电流平均值 >2000mA => 视为门已关紧
+// (滑动窗口平均, 60个样本 x 50ms, 抗电流波动)
+#define VSW_MA         2000.0f
+#define VSW_MS         3000UL
+#define VSW_WIN        60        // = VSW_MS / 50ms
+
 Adafruit_INA219 ina219(0x40);
 Servo servoDoor, servoHandle;
 
@@ -75,14 +81,29 @@ enum SeqType { SEQ_NONE = 0, SEQ_HOME, SEQ_OPEN, SEQ_CLOSE };
 SeqType seq = SEQ_NONE;
 int seqStep = 0;
 
+// 耐久测试(cycle test): 反复 开门->停5s->关门->停5s, 计数
+bool cycling = false;
+int  cycleTarget = 0, cycleCount = 0;
+int  cyclePhase = 0;      // 0=启动开门 1=开门中 2=开后暂停 3=启动关门 4=关门中 5=关后暂停
+unsigned long cyclePauseUntil = 0;
+#define CYCLE_PAUSE_MS 5000UL
+
 // Current monitoring
 float lastI = 0;
 unsigned long hiSince = 0;
 
 // Door-closed switch (debounced) + close-sequence bookkeeping
 bool swPressed = false;
+bool vswPressed = false;          // 虚拟开关(3秒电流均值判定)
+float vswBuf[VSW_WIN];            // 滑动窗口
+int   vswIdx = 0, vswCount = 0;
+float vswSum = 0;
 unsigned long closeWaitStart = 0;
 int closeReliefSteps = 0;
+
+void resetVsw() {
+  vswIdx = 0; vswCount = 0; vswSum = 0; vswPressed = false;
+}
 #define CLOSE_SWITCH_TIMEOUT_MS 60000UL   // waiting for switch longer than this -> e-stop
 
 const char* seqName() {
@@ -113,6 +134,7 @@ void freezeAll() {
 void doStop(const char* why) {
   freezeAll();
   seq = SEQ_NONE;
+  cycling = false;          // 急停同时中止耐久测试
   stopped = true;
   stopReason = why;
   hiSince = 0;
@@ -133,6 +155,7 @@ void engageServos() {
 
 void moveServo(int ch, int angle) {
   if (stopped) { Serial.println("!! E-stopped, send 'start' first"); return; }
+  if (cycling) { Serial.println("!! Cycle test running, send 'stop' first"); return; }
   if (seq != SEQ_NONE) { Serial.printf("!! Sequence [%s] running, stop it or wait\n", seqName()); return; }
   engageServos();
   if (ch == 0) {
@@ -155,6 +178,7 @@ void startSeq(SeqType t) {
   seq = t;
   seqStep = 0;
   hiSince = 0;
+  resetVsw();           // 虚拟开关每次序列重新判定
   Serial.printf(">> Sequence start: %s\n", seqName());
 }
 
@@ -189,10 +213,12 @@ void tickSeq(unsigned long now) {
         }
         // snug via current rule handled in checkCurrent()
       }
-      else if (seqStep == 2) {              // hold pressure, wait for door switch
-        if (swPressed) {
+      else if (seqStep == 2) {              // hold pressure, wait for door switch (physical OR virtual)
+        // 虚拟开关判定在 updateVirtualSwitch() 里(50ms节拍, 3秒滑动平均>2200mA)
+        if (swPressed || vswPressed) {
           tgtHandle = HANDLE_LOCK; seqStep = 3;
-          Serial.printf(">> [close] switch pressed -> locking: handle -> %d\n", HANDLE_LOCK);
+          Serial.printf(">> [close] %s switch pressed -> locking: handle -> %d\n",
+                        swPressed ? "door(D17)" : "virtual", HANDLE_LOCK);
         } else if (now - closeWaitStart > CLOSE_SWITCH_TIMEOUT_MS) {
           doStop("close timeout: door switch not pressed");
         }
@@ -219,6 +245,63 @@ void tickSeq(unsigned long now) {
       break;
 
     default: break;
+  }
+}
+
+// ---- 耐久测试状态机: 开门 -> 停5s -> 关门 -> 停5s -> 计数, 循环 ----
+void tickCycle(unsigned long now) {
+  if (!cycling || stopped) return;
+  switch (cyclePhase) {
+    case 0:   // 启动开门
+      if (seq == SEQ_NONE) { startSeq(SEQ_OPEN); cyclePhase = 1; }
+      break;
+    case 1:   // 等开门序列完成
+      if (seq == SEQ_NONE) { cyclePauseUntil = now + CYCLE_PAUSE_MS; cyclePhase = 2; }
+      break;
+    case 2:   // 开门后暂停5s
+      if (now >= cyclePauseUntil) cyclePhase = 3;
+      break;
+    case 3:   // 启动关门
+      if (seq == SEQ_NONE) { startSeq(SEQ_CLOSE); cyclePhase = 4; }
+      break;
+    case 4:   // 等关门序列完成
+      if (seq == SEQ_NONE) {
+        cycleCount++;
+        Serial.printf(">> [cycle] %d/%d complete\n", cycleCount, cycleTarget);
+        cyclePauseUntil = now + CYCLE_PAUSE_MS; cyclePhase = 5;
+      }
+      break;
+    case 5:   // 关门后暂停5s, 决定继续或结束
+      if (now >= cyclePauseUntil) {
+        if (cycleCount >= cycleTarget) {
+          cycling = false;
+          Serial.printf(">> Cycle test finished: %d cycles done\n", cycleCount);
+        } else {
+          cyclePhase = 0;
+        }
+      }
+      break;
+  }
+}
+
+// ---- 虚拟开关: 顶门阶段, 最近3秒电流均值 >2000mA => 按下 ----
+void updateVirtualSwitch() {
+  if (!(seq == SEQ_CLOSE && seqStep == 2)) return;   // 只在顶门等待阶段统计
+  float a = fabs(lastI);
+  if (vswCount < VSW_WIN) {                // 窗口未满: 累积
+    vswBuf[vswIdx] = a;
+    vswSum += a;
+    vswIdx = (vswIdx + 1) % VSW_WIN;
+    vswCount++;
+  } else {                                 // 窗口已满: 滑动(去旧补新)
+    vswSum += a - vswBuf[vswIdx];
+    vswBuf[vswIdx] = a;
+    vswIdx = (vswIdx + 1) % VSW_WIN;
+  }
+  if (!vswPressed && vswCount >= VSW_WIN && (vswSum / VSW_WIN) > VSW_MA) {
+    vswPressed = true;
+    Serial.printf(">> [close] virtual switch pressed (avg %.0fmA over %lds > %.0fmA)\n",
+                  vswSum / VSW_WIN, (long)(VSW_MS / 1000), VSW_MA);
   }
 }
 
@@ -267,9 +350,21 @@ void parseCommand(String cmd) {
   String rest = (sp > 0) ? cmd.substring(sp + 1) : "";
   rest.trim();
 
-  if (tok == "open")       startSeq(SEQ_OPEN);
-  else if (tok == "close") startSeq(SEQ_CLOSE);
-  else if (tok == "home")  startSeq(SEQ_HOME);
+  if (tok == "open" || tok == "close" || tok == "home") {
+    if (cycling) { Serial.println("!! Cycle test running, send 'stop' to abort it first"); return; }
+    startSeq(tok == "open" ? SEQ_OPEN : tok == "close" ? SEQ_CLOSE : SEQ_HOME);
+  }
+  else if (tok == "cycle") {        // 耐久测试: cycle <n>
+    if (stopped) { Serial.println("!! E-stopped, send 'start' first"); return; }
+    if (cycling) { Serial.printf("!! Cycle test already running (%d/%d)\n", cycleCount, cycleTarget); return; }
+    int n = rest.toInt();
+    if (n < 1) { Serial.println(">> usage: cycle <n>   e.g. 'cycle 10'"); return; }
+    cycleTarget = min(n, 10000);
+    cycleCount = 0;
+    cyclePhase = 0;
+    cycling = true;
+    Serial.printf(">> Cycle test start: %d cycles (open -> 5s -> close -> 5s)\n", cycleTarget);
+  }
   else if (tok == "stop") {
     doStop("manual STOP");
   }
@@ -288,6 +383,7 @@ void parseCommand(String cmd) {
     int s2 = rest.indexOf(' ');
     if (s2 > 0) {
       if (stopped) { Serial.println("!! E-stopped, send 'start' first"); return; }
+      if (cycling) { Serial.println("!! Cycle test running, send 'stop' first"); return; }
       if (seq != SEQ_NONE) { Serial.println("!! Sequence running"); return; }
       engageServos();
       int ch = rest.substring(0, s2).toInt();
@@ -375,8 +471,12 @@ void loop() {
     bool raw = (digitalRead(DOOR_SWITCH_PIN) == SWITCH_PRESSED_LEVEL);
     if (raw == lastRaw) swPressed = raw;
     lastRaw = raw;
+    updateVirtualSwitch();   // 50ms 节拍: 顶门阶段的滑动平均
     checkCurrent(now);
   }
+
+  // endurance cycle test (sits above the sequence machine)
+  tickCycle(now);
 
   // sequence state machine
   tickSeq(now);
@@ -398,7 +498,7 @@ void loop() {
     lastPrint = now;
     float busV  = ina219.getBusVoltage_V();
     float power = ina219.getPower_mW();
-    char suffix[64] = "";
+    char suffix[96] = "";
     if (stopped) {
       snprintf(suffix, sizeof(suffix), "  !!ESTOP:%s%s!!",
                stopReason.c_str(), detachedFlag ? "(detached)" : "");
@@ -407,8 +507,13 @@ void loop() {
     } else if (!servosEngaged) {
       snprintf(suffix, sizeof(suffix), "  {servos:idle}");
     }
-    Serial.printf("V=%.2fV  I=%.1fmA  P=%.0fmW   [door=%d  handle=%d  sw=%d]%s\n",
+    if (cycling) {   // 耐久测试进度(叠加显示)
+      char cyc[24];
+      snprintf(cyc, sizeof(cyc), "  {cyc:%d/%d}", cycleCount, cycleTarget);
+      strncat(suffix, cyc, sizeof(suffix) - strlen(suffix) - 1);
+    }
+    Serial.printf("V=%.2fV  I=%.1fmA  P=%.0fmW   [door=%d  handle=%d  sw=%d  vsw=%d]%s\n",
                   busV, lastI, power, (int)(curDoor + 0.5f), (int)(curHandle + 0.5f),
-                  swPressed ? 1 : 0, suffix);
+                  swPressed ? 1 : 0, vswPressed ? 1 : 0, suffix);
   }
 }

@@ -49,8 +49,10 @@ class SerialWorker:
         self.fault = False          # 急停状态
         self.fault_reason = ""      # 急停原因
         self.seq_status = None      # 序列执行状态文本
-        self.door_switch = False    # D17 门关紧开关
+        self.door_switch = False    # D17 门关紧开关(物理)
+        self.virt_switch = False    # 虚拟开关(电流特征)
         self.servos_idle = False    # 舵机待机(未上电)
+        self.cycle_status = None    # 耐久测试进度 "3/10"
         self.door_actual = None
         self.handle_actual = None
         self.t0 = time.time()
@@ -117,15 +119,20 @@ class SerialWorker:
                 sq = re.search(r"\{seq:(\w+):(\d+)\}", line)
                 self.seq_status = f"{sq.group(1).capitalize()} · step {sq.group(2)}" if sq else None
                 self.servos_idle = "{servos:idle}" in line
+                cy = re.search(r"\{cyc:(\d+)/(\d+)\}", line)
+                self.cycle_status = f"{cy.group(1)}/{cy.group(2)}" if cy else None
             elif "!!! ESTOP" in line:
                 self.fault = True
             a = ANGLE_RE.search(line)
             if a:
                 self.door_actual = int(a.group(1))
                 self.handle_actual = int(a.group(2))
-            sw = re.search(r"sw=(\d)", line)
+            sw = re.search(r"\bsw=(\d)", line)
             if sw:
                 self.door_switch = sw.group(1) == "1"
+            vsw = re.search(r"\bvsw=(\d)", line)
+            if vsw:
+                self.virt_switch = vsw.group(1) == "1"
 
     def _drop(self):
         self.connected = False
@@ -325,6 +332,30 @@ class App:
         tk.Label(srow, text="°/s   (30 = slow default, 300 = fast)", bg=BG, fg=MUTED,
                  font=("Helvetica", 10)).pack(side="left")
 
+        # 耐久测试: 次数输入 + 启动按钮 (放在 Speed 行右侧)
+        run_btn = tk.Label(srow, text="🔁 Run Cycle Test", bg=AMBER, fg="#000",
+                           font=("Helvetica", 12, "bold"), padx=14, pady=6,
+                           cursor="hand2")
+        run_btn.pack(side="right", padx=(8, 0))
+        self.cycle_var = tk.StringVar(value="10")
+        tk.Entry(srow, textvariable=self.cycle_var, width=6, justify="center",
+                 bg="#0d1218", fg=FG, insertbackground=FG, relief="flat",
+                 font=("Helvetica", 13)).pack(side="right", padx=4)
+        tk.Label(srow, text="Cycles:", bg=BG, fg=MUTED,
+                 font=("Helvetica", 12, "bold")).pack(side="right")
+
+        def run_cycles(_e=None):
+            try:
+                n = max(1, min(10000, int(float(self.cycle_var.get()))))
+            except ValueError:
+                self.cycle_var.set("10")
+                return
+            self.cycle_var.set(str(n))
+            run_btn.config(bg="#ffffff")
+            run_btn.after(120, lambda: run_btn.config(bg=AMBER))
+            self.worker.send_line(f"cycle {n}")
+        run_btn.bind("<Button-1>", run_cycles)
+
         # 过流保护警告横幅（平时隐藏）
         self.fault_bar = tk.Frame(self.root, bg="#3a1215", highlightthickness=1,
                                   highlightbackground=RED)
@@ -423,17 +454,23 @@ class App:
             self.fault_bar.pack_forget()
             self._fault_visible = False
 
-        # 序列状态 / 舵机待机提示
-        if w.seq_status:
+        # 序列状态 / 耐久测试进度 / 舵机待机提示
+        if w.cycle_status and w.seq_status:
+            self.seq_lbl.config(text=f"🔁 Cycle {w.cycle_status} · {w.seq_status}", fg=AMBER)
+        elif w.cycle_status:
+            self.seq_lbl.config(text=f"🔁 Cycle {w.cycle_status} · pausing", fg=AMBER)
+        elif w.seq_status:
             self.seq_lbl.config(text=f"⚙️ Running: {w.seq_status}", fg=AMBER)
         elif w.servos_idle:
             self.seq_lbl.config(text="💤 Servos idle — any command engages them", fg=MUTED)
         else:
             self.seq_lbl.config(text="", fg=AMBER)
 
-        # D17 门关紧开关状态
+        # 门关紧开关状态: 物理D17 / 虚拟(电流特征)
         if w.door_switch:
             self.sw_lbl.config(text="● Switch: PRESSED", fg=GREEN)
+        elif w.virt_switch:
+            self.sw_lbl.config(text="● Switch: VIRTUAL", fg=AMBER)
         else:
             self.sw_lbl.config(text="⭘ Switch: open", fg=MUTED)
 

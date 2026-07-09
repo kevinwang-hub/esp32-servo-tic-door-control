@@ -41,8 +41,9 @@ ESP32 ── SDA=GPIO21  SCL=GPIO22 ── INA219 (addr 0x40, R100 shunt, ±3.2A
 | Command | Action |
 |---------|--------|
 | `open` | Sequence: unlock (handle→0), door→90, door→55 |
-| `close` | Sequence: door→220 (stops on resistance = snug), wait for D17 switch, handle→125 lock, relieve pressure |
+| `close` | Sequence: door→220 (stops on resistance = snug), wait for door-closed confirmation (physical D17 **or** virtual switch), handle→125 lock, relieve pressure |
 | `home` | Sequence: unlock (handle→0), door→90 |
+| `cycle <n>` | Endurance test: repeat open → 5s pause → close → 5s pause, n times, with live count |
 | `stop` | Emergency stop: freeze all motion + abort sequence |
 | `start` (`reset`) | Resume / engage servos |
 | `<ch> <angle>` | Manual move (ch 0=door limited 55–220, ch 1=handle) |
@@ -52,9 +53,10 @@ ESP32 ── SDA=GPIO21  SCL=GPIO22 ── INA219 (addr 0x40, R100 shunt, ±3.2A
 
 Telemetry line (every 150 ms):
 ```
-V=7.60V  I=72.6mA  P=534mW   [door=190  handle=0  sw=0]  {servos:idle}
+V=7.60V  I=72.6mA  P=534mW   [door=190  handle=0  sw=0  vsw=0]  {servos:idle}
 ```
-Status suffixes: `!!ESTOP:reason!!`, `{seq:name:step}`, `{servos:idle}`.
+Status suffixes: `!!ESTOP:reason!!`, `{seq:name:step}`, `{servos:idle}`, `{cyc:count/target}`.
+`sw` = physical D17 switch, `vsw` = virtual (current-signature) switch.
 
 ## Safety logic
 
@@ -66,7 +68,11 @@ Status suffixes: `!!ESTOP:reason!!`, `{seq:name:step}`, `{servos:idle}`.
 - **Close steps after the door stops are exempt** from the current rule: the door
   servo holds pressure (high current is normal) while the handle turns to lock —
   a single shared current sensor must not freeze the handle here.
-- **Door switch (D17)** confirms the door is physically shut before locking.
+- **Door-closed confirmation before locking**: physical D17 switch **or** a virtual
+  switch — a 3 s rolling average of current > 2000 mA while pressing (robust to
+  current fluctuation). Either one advances to the lock step; 60 s timeout → e-stop.
+- **Endurance testing**: `cycle <n>` (GUI: "Run Cycle Test") runs open/close cycles
+  with 5 s pauses and a live counter; any e-stop aborts the run at the failing cycle.
 - **Servos idle on boot/reset** (no PWM) so a reset never slams the door; the
   first command engages them.
 - Over-current after an e-stop escalates to detaching PWM (power-off).
