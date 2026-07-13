@@ -53,10 +53,11 @@ ESP32 ── SDA=GPIO21  SCL=GPIO22 ── INA219 (addr 0x40, R100 shunt, ±3.2A
 
 Telemetry line (every 150 ms):
 ```
-V=7.60V  I=72.6mA  P=534mW   [door=190  handle=0  sw=0  vsw=0]  {servos:idle}
+V=7.60V  I=72.6mA  P=534mW   [door=190  handle=0  sw=0  vsw=0  tc=119]  {servos:idle}
 ```
 Status suffixes: `!!ESTOP:reason!!`, `{seq:name:step}`, `{servos:idle}`, `{cyc:count/target}`.
-`sw` = physical D17 switch, `vsw` = virtual (current-signature) switch.
+`sw` = physical D17 switch, `vsw` = virtual (current-signature) switch,
+`tc` = lifetime cycle counter (persisted in NVS, survives power loss and reflash).
 
 ## Safety logic
 
@@ -69,7 +70,7 @@ Status suffixes: `!!ESTOP:reason!!`, `{seq:name:step}`, `{servos:idle}`, `{cyc:c
   servo holds pressure (high current is normal) while the handle turns to lock —
   a single shared current sensor must not freeze the handle here.
 - **Door-closed confirmation before locking**: physical D17 switch **or** a virtual
-  switch — a 3 s rolling average of current > 2000 mA while pressing (robust to
+  switch — a 3 s rolling average of current > 1600 mA while pressing (robust to
   current fluctuation). Either one advances to the lock step; 60 s timeout → e-stop.
 - **Endurance testing**: `cycle <n>` (GUI: "Run Cycle Test") runs open/close cycles
   with 5 s pauses and a live counter; any e-stop aborts the run at the failing cycle.
