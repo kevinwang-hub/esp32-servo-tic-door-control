@@ -94,7 +94,7 @@ Features:
 
 ## Variant: INA219 current-monitored servo door
 
-This branch (`ina219-servo-current-door`) also contains an alternate
+This branch (`new-v2`) also contains an alternate
 implementation that drops the Tic stepper and instead uses an **INA219 current
 sensor** for closed-loop safety (over-current e-stop, snug detection) on the two
 RDS5180 servos. See **[README-ina219-servo-door.md](README-ina219-servo-door.md)**

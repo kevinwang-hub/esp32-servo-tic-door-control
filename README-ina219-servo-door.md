@@ -1,4 +1,4 @@
-# INA219 Servo Door Control (branch: `ina219-servo-current-door`)
+# INA219 Servo Door Control (branch: `new-v2`)
 
 An alternate implementation of the door controller on this branch: **two RDS5180
 digital servos driven by an ESP32, with live current/voltage sensing via an
